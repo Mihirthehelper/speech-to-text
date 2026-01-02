@@ -1,86 +1,109 @@
-# Minimal audio utilities without pydub.
-# Uses ffmpeg + soundfile to convert arbitrary audio to 16k mono WAV and read it.
-# Requires: soundfile (pysoundfile), numpy, and ffmpeg binary available on PATH.
+# Minimal audio utilities expected by streamlit_app.py
+# - load_whisper_model(model_name="base")
+# - convert_uploaded_file_to_wav(uploaded, target_sr=16000) -> str (path to wav)
+# - transcribe_with_whisper(model, wav_path, **kwargs) -> dict (whisper result)
+#
+# Requires:
+# - ffmpeg binary on PATH
+# - openai-whisper package installed (whisper.load_model)
+# - subprocess, tempfile, os
 
 import subprocess
 import tempfile
 import os
-from typing import Tuple, Union
-import numpy as np
-import soundfile as sf
+from typing import Union, Tuple, Dict
 
-def _write_bytes_to_tempfile(data: bytes) -> str:
-    f = tempfile.NamedTemporaryFile(delete=False)
+# Lazy-import whisper to avoid import-time cost if not needed
+def load_whisper_model(model_name: str = "base"):
+    """
+    Load and return a Whisper model. Example: model = load_whisper_model("small")
+    """
     try:
+        import whisper
+    except Exception as e:
+        raise ImportError(
+            "Failed to import whisper. Make sure openai-whisper is installed and compatible with the runtime."
+        ) from e
+    return whisper.load_model(model_name)
+
+
+def _write_bytes_to_tempfile(data: bytes, suffix: str = "") -> str:
+    fd, path = tempfile.mkstemp(suffix=suffix)
+    os.close(fd)
+    with open(path, "wb") as f:
         f.write(data)
-        f.flush()
-        return f.name
-    finally:
-        f.close()
+    return path
 
-def _ffmpeg_convert_to_wav(in_path: str, out_path: str, sample_rate: int = 16000) -> None:
-    """
-    Convert in_path (any ffmpeg-supported audio file) to WAV at sample_rate, mono.
-    Output written to out_path.
-    Raises CalledProcessError on failure.
-    """
-    cmd = [
-        "ffmpeg",
-        "-y",              # overwrite
-        "-i", in_path,     # input file
-        "-ar", str(sample_rate),  # audio sample rate
-        "-ac", "1",        # mono
-        "-f", "wav",
-        out_path
-    ]
-    # We hide ffmpeg stdout/stderr to keep logs tidy; remove stdout/stderr args to debug.
-    subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-def load_audio_from_bytes(data: bytes, target_sr: int = 16000) -> Tuple[np.ndarray, int]:
+def convert_uploaded_file_to_wav(
+    uploaded: Union[bytes, str], target_sr: int = 16000
+) -> str:
     """
-    Convert bytes of an audio file to a numpy float32 array and sample rate.
-    Returns (audio, sample_rate). Audio is 1-D numpy float32 with values in [-1.0, 1.0].
+    Convert uploaded audio (bytes or file path) to a temporary WAV file (mono, target_sr).
+    Returns the path to the WAV file on disk. Caller should remove the file when done.
     """
-    in_path = _write_bytes_to_tempfile(data)
+    # Accept either raw bytes or a path (string)
+    if isinstance(uploaded, bytes):
+        in_path = _write_bytes_to_tempfile(uploaded)
+    elif isinstance(uploaded, str):
+        in_path = uploaded
+    else:
+        raise TypeError("uploaded must be bytes or a file path string")
+
     out_fd, out_path = tempfile.mkstemp(suffix=".wav")
     os.close(out_fd)
-    try:
-        _ffmpeg_convert_to_wav(in_path, out_path, sample_rate=target_sr)
-        audio, sr = sf.read(out_path, dtype="float32")
-        # sf.read may return (n_frames, 1) for mono; flatten to 1D
-        if audio.ndim > 1:
-            audio = np.mean(audio, axis=1)
-        return audio, sr
-    finally:
-        for p in (in_path, out_path):
-            try:
-                os.remove(p)
-            except Exception:
-                pass
 
-def load_audio(source: Union[str, bytes], target_sr: int = 16000) -> Tuple[np.ndarray, int]:
-    """
-    Load audio from a file path or raw bytes.
-    - If `source` is bytes, it will be treated as file contents and piped through ffmpeg.
-    - If `source` is a string path, it will be read by ffmpeg similarly.
-    Returns (audio, sample_rate).
-    """
-    if isinstance(source, bytes):
-        return load_audio_from_bytes(source, target_sr=target_sr)
-    elif isinstance(source, str):
-        # treat as file path
-        out_fd, out_path = tempfile.mkstemp(suffix=".wav")
-        os.close(out_fd)
-        try:
-            _ffmpeg_convert_to_wav(source, out_path, sample_rate=target_sr)
-            audio, sr = sf.read(out_path, dtype="float32")
-            if audio.ndim > 1:
-                audio = np.mean(audio, axis=1)
-            return audio, sr
-        finally:
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-i",
+        in_path,
+        "-ar",
+        str(target_sr),
+        "-ac",
+        "1",
+        "-f",
+        "wav",
+        out_path,
+    ]
+    # Run ffmpeg; hide output unless it fails
+    try:
+        subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except subprocess.CalledProcessError as e:
+        # If we created a temp input file from bytes, remove it
+        if isinstance(uploaded, bytes):
             try:
-                os.remove(out_path)
+                os.remove(in_path)
             except Exception:
                 pass
-    else:
-        raise TypeError("source must be bytes or str(file path)")
+        # remove out file if present
+        try:
+            os.remove(out_path)
+        except Exception:
+            pass
+        raise RuntimeError("ffmpeg failed to convert uploaded audio to WAV") from e
+
+    # remove temp input if it was created from bytes
+    if isinstance(uploaded, bytes):
+        try:
+            os.remove(in_path)
+        except Exception:
+            pass
+
+    return out_path
+
+
+def transcribe_with_whisper(model, wav_path: str, **kwargs) -> Dict:
+    """
+    Transcribe the WAV file at wav_path using the given whisper model.
+    Returns the full whisper result dict (contains 'text', segments, etc).
+    Example:
+      result = transcribe_with_whisper(model, wav_path, language="en", temperature=0.0)
+      text = result["text"]
+    """
+    # whisper models accept file path directly
+    try:
+        result = model.transcribe(wav_path, **kwargs)
+    except Exception as e:
+        raise RuntimeError("Whisper transcription failed") from e
+    return result
