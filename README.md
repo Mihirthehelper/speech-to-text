@@ -1,6 +1,6 @@
 # Streamlit Speech-to-Text Demo
 
-A simple Streamlit app to transcribe uploaded audio using OpenAI's open-source Whisper model (small). The app converts audio to 16 kHz mono, runs transcription, displays editable timestamped segments, and lets you download the transcript as .txt or .srt.
+A Streamlit app to transcribe uploaded audio using OpenAI's open-source Whisper model (small). The app converts audio to 16 kHz mono, runs transcription, displays editable timestamped segments, and lets you download the transcript as .txt or .srt.
 
 Features
 - Upload audio files (wav, mp3, m4a, webm)
