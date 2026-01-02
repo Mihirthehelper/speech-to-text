@@ -1,83 +1,86 @@
-import whisper
-from pydub import AudioSegment
+# Minimal audio utilities without pydub.
+# Uses ffmpeg + soundfile to convert arbitrary audio to 16k mono WAV and read it.
+# Requires: soundfile (pysoundfile), numpy, and ffmpeg binary available on PATH.
+
+import subprocess
 import tempfile
 import os
-import json
-from typing import List, Dict
+from typing import Tuple, Union
+import numpy as np
+import soundfile as sf
 
-
-_model_cache = {}
-
-
-def load_whisper_model(model_name: str = "small"):
-    """
-    Load and cache a whisper model.
-    """
-    if model_name in _model_cache:
-        return _model_cache[model_name]
-    model = whisper.load_model(model_name)
-    _model_cache[model_name] = model
-    return model
-
-
-def convert_uploaded_file_to_wav(uploaded_file) -> str:
-    """
-    Take a Streamlit uploaded_file (a BytesIO), write to temp file, convert with pydub to 16k mono WAV,
-    and return the temp wav filepath.
-    """
-    suffix = os.path.splitext(uploaded_file.name)[1].lower()
-    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as in_tmp:
-        in_tmp.write(uploaded_file.read())
-        in_path = in_tmp.name
-
-    # pydub auto-detects format from suffix
-    audio = AudioSegment.from_file(in_path)
-    audio = audio.set_frame_rate(16000).set_channels(1).set_sample_width(2)
-
-    out_tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".wav")
-    out_path = out_tmp.name
-    audio.export(out_path, format="wav")
-    # remove input temp
+def _write_bytes_to_tempfile(data: bytes) -> str:
+    f = tempfile.NamedTemporaryFile(delete=False)
     try:
-        os.remove(in_path)
-    except Exception:
-        pass
-    return out_path
+        f.write(data)
+        f.flush()
+        return f.name
+    finally:
+        f.close()
 
-
-def transcribe_with_whisper(model, audio_file_path: str, language: str = None) -> Dict:
+def _ffmpeg_convert_to_wav(in_path: str, out_path: str, sample_rate: int = 16000) -> None:
     """
-    Transcribe with whisper and return the raw result dict (including segments).
+    Convert in_path (any ffmpeg-supported audio file) to WAV at sample_rate, mono.
+    Output written to out_path.
+    Raises CalledProcessError on failure.
     """
-    options = {}
-    if language:
-        options["language"] = language
-        options["task"] = "transcribe"
-    # Use fp16=False on CPU to avoid errors
-    result = model.transcribe(audio_file_path, **options, fp16=False)
-    return result
+    cmd = [
+        "ffmpeg",
+        "-y",              # overwrite
+        "-i", in_path,     # input file
+        "-ar", str(sample_rate),  # audio sample rate
+        "-ac", "1",        # mono
+        "-f", "wav",
+        out_path
+    ]
+    # We hide ffmpeg stdout/stderr to keep logs tidy; remove stdout/stderr args to debug.
+    subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
+def load_audio_from_bytes(data: bytes, target_sr: int = 16000) -> Tuple[np.ndarray, int]:
+    """
+    Convert bytes of an audio file to a numpy float32 array and sample rate.
+    Returns (audio, sample_rate). Audio is 1-D numpy float32 with values in [-1.0, 1.0].
+    """
+    in_path = _write_bytes_to_tempfile(data)
+    out_fd, out_path = tempfile.mkstemp(suffix=".wav")
+    os.close(out_fd)
+    try:
+        _ffmpeg_convert_to_wav(in_path, out_path, sample_rate=target_sr)
+        audio, sr = sf.read(out_path, dtype="float32")
+        # sf.read may return (n_frames, 1) for mono; flatten to 1D
+        if audio.ndim > 1:
+            audio = np.mean(audio, axis=1)
+        return audio, sr
+    finally:
+        for p in (in_path, out_path):
+            try:
+                os.remove(p)
+            except Exception:
+                pass
 
-def segments_to_text(segments: List[Dict]) -> str:
-    return "\n".join([seg.get("text", "").strip() for seg in segments])
-
-
-def seconds_to_srt_timestamp(s: float) -> str:
-    h = int(s // 3600)
-    m = int((s % 3600) // 60)
-    sec = int(s % 60)
-    ms = int((s - int(s)) * 1000)
-    return f"{h:02}:{m:02}:{sec:02},{ms:03}"
-
-
-def segments_to_srt(segments: List[Dict]) -> str:
-    lines = []
-    for i, seg in enumerate(segments, start=1):
-        start = seconds_to_srt_timestamp(seg["start"])
-        end = seconds_to_srt_timestamp(seg["end"])
-        text = seg["text"].strip()
-        lines.append(f"{i}")
-        lines.append(f"{start} --> {end}")
-        lines.append(text)
-        lines.append("")  # blank line
-    return "\n".join(lines)
+def load_audio(source: Union[str, bytes], target_sr: int = 16000) -> Tuple[np.ndarray, int]:
+    """
+    Load audio from a file path or raw bytes.
+    - If `source` is bytes, it will be treated as file contents and piped through ffmpeg.
+    - If `source` is a string path, it will be read by ffmpeg similarly.
+    Returns (audio, sample_rate).
+    """
+    if isinstance(source, bytes):
+        return load_audio_from_bytes(source, target_sr=target_sr)
+    elif isinstance(source, str):
+        # treat as file path
+        out_fd, out_path = tempfile.mkstemp(suffix=".wav")
+        os.close(out_fd)
+        try:
+            _ffmpeg_convert_to_wav(source, out_path, sample_rate=target_sr)
+            audio, sr = sf.read(out_path, dtype="float32")
+            if audio.ndim > 1:
+                audio = np.mean(audio, axis=1)
+            return audio, sr
+        finally:
+            try:
+                os.remove(out_path)
+            except Exception:
+                pass
+    else:
+        raise TypeError("source must be bytes or str(file path)")
