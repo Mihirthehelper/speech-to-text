@@ -3,6 +3,7 @@
 # - convert_uploaded_file_to_wav(uploaded, target_sr=16000) -> str (path to wav)
 # - transcribe_with_whisper(model, wav_path, **kwargs) -> dict (whisper result)
 # - segments_to_srt(segments) -> str (SRT formatted captions)
+# - segments_to_text(segments, sep=" ") -> str (concatenated segment text)
 #
 # Requirements:
 # - ffmpeg binary on PATH
@@ -61,7 +62,6 @@ def convert_uploaded_file_to_wav(
         in_path = uploaded
     elif _is_file_like(uploaded):
         content = uploaded.read()
-        # Some file-likes allow multiple reads; ensure bytes
         if isinstance(content, str):
             content = content.encode()
         in_path = _write_bytes_to_tempfile(content)
@@ -169,3 +169,21 @@ def segments_to_srt(segments: List[Dict[str, Any]]) -> str:
         lines.append("")  # blank line between entries
 
     return "\n".join(lines)
+
+
+def segments_to_text(segments: List[Dict[str, Any]], sep: str = " ") -> str:
+    """
+    Convert Whisper segments to plain concatenated text.
+    - segments: list of dicts with 'text' keys (e.g., whisper result["segments"])
+    - sep: string used to join segments (default single space)
+    Returns a trimmed string.
+    """
+    texts = []
+    for seg in segments:
+        t = seg.get("text", "")
+        if not isinstance(t, str):
+            t = str(t)
+        t = t.strip()
+        if t:
+            texts.append(t)
+    return sep.join(texts).strip()
