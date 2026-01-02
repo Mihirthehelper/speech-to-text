@@ -222,13 +222,25 @@ def convert_uploaded_file_to_wav(
     return out_path
 
 
-def transcribe_with_whisper(model, wav_path: str, **kwargs) -> Dict[str, Any]:
+def transcribe_with_whisper(model, wav_path: str, target_sr: int = 16000, **kwargs) -> Dict[str, Any]:
     """
-    Transcribe the WAV file at wav_path using the given whisper model.
-    Returns the full whisper result dict (contains 'text', 'segments', etc).
+    Transcribe the audio using a Whisper model without invoking Whisper's ffmpeg-based loader.
+    - If wav_path is a file path (string) we read it with soundfile and resample (if necessary),
+      then pass the numpy array to model.transcribe to avoid ffmpeg.
+    - If wav_path is already an array/tensor, we pass it through to model.transcribe.
     """
     try:
-        result = model.transcribe(wav_path, **kwargs)
+        # If user passed a path, load it with soundfile so Whisper won't call ffmpeg.
+        if isinstance(wav_path, str):
+            audio, sr = sf.read(wav_path, dtype="float32")
+            if audio.ndim > 1:
+                audio = np.mean(audio, axis=1)
+            if sr != target_sr:
+                audio = _resample_audio(audio, sr, target_sr)
+            result = model.transcribe(audio, **kwargs)
+        else:
+            # assume wav_path is already a numpy array or torch tensor
+            result = model.transcribe(wav_path, **kwargs)
     except Exception as e:
         raise RuntimeError("Whisper transcription failed") from e
     return result
