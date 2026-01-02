@@ -1,6 +1,6 @@
 streamlit>=1.22
-whisper @ git+https://github.com/openai/whisper.git
+openai-whisper @ git+https://github.com/openai/whisper.git#egg=openai-whisper
 pydub
-torch   # pick the right torch wheel for your platform; cpu-only installs may be large
+torch
 soundfile
 numpy
